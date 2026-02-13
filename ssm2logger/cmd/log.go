@@ -17,9 +17,8 @@ package cmd
 import (
 	"encoding/csv"
 	"encoding/hex"
-	"encoding/xml"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,25 +31,29 @@ import (
 )
 
 var logfile_path string
+var defsPath string
+var logFormat string
+var paramsCsv string
+var allParams bool
+var maxAddresses int
+
+type ndjsonSample struct {
+	Ts    int64              `json:"ts"`
+	RomID string             `json:"rom_id"`
+	SsmID string             `json:"ssm_id"`
+	Data  map[string]float64 `json:"data"`
+}
 
 // logCmd represents the log command
 var logCmd = &cobra.Command{
 	Use:   "log",
-	Short: "Logs SSM2 data, along with any plugin data to a csv file",
+	Short: "Logs SSM2 data and writes CSV or NDJSON samples",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		xmlfile, err := os.Open("logger_STD_EN_v336.xml")
-		if err != nil {
-			return err
-		}
-		defer xmlfile.Close()
-
-		xmlbytes, err := ioutil.ReadAll(xmlfile)
-		if err != nil {
-			return err
+		if logFormat != "csv" && logFormat != "ndjson" {
+			return fmt.Errorf("unsupported format %q; expected csv or ndjson", logFormat)
 		}
 
-		logDefs := &Ssm2Logger{}
-		err = xml.Unmarshal(xmlbytes, &logDefs)
+		logDefs, err := loadLoggerDefinitions(defsPath)
 		if err != nil {
 			return err
 		}
@@ -58,7 +61,9 @@ var logCmd = &cobra.Command{
 		ssm2_conn := &Ssm2Connection{}
 		ssm2_conn.SetLogger(logger)
 
-		ssm2_conn.Open(port)
+		if err := ssm2_conn.Open(port); err != nil {
+			return err
+		}
 		defer ssm2_conn.Close()
 
 		initResponse, err := ssm2_conn.InitEngine()
@@ -66,21 +71,8 @@ var logCmd = &cobra.Command{
 			return err
 		}
 
-		capBytes := initResponse.GetCapabilityBytes()
-		var supportedParams []Ssm2Parameter
-
-		for _, proto := range logDefs.Protocols {
-			if proto.Id == "SSM" {
-				for _, param := range proto.Parameters {
-					//fmt.Println(resp_bytes[8] & (1 << 6)) A test of looking for a specific parameter using bitwise operators. Gotta move this elsewhere.
-					if param.EcuByteIndex < uint(len(capBytes)) {
-						if (capBytes[param.EcuByteIndex] & (1 << param.EcuBit)) > 0 {
-							supportedParams = append(supportedParams, param)
-						}
-					}
-				}
-			}
-		}
+		allSsmParams := getSsmProtocolParameters(logDefs)
+		supportedParams := getSupportedParameters(allSsmParams, initResponse.GetCapabilityBytes())
 
 		logger.WithFields(log.Fields{
 			"SsmId":                  hex.EncodeToString(initResponse.GetSsmId()),
@@ -88,18 +80,31 @@ var logCmd = &cobra.Command{
 			"Supported Capabilities": len(supportedParams),
 		}).Info("Initialized ECM")
 
-		// Cooldown between writes?!
-		time.Sleep(200 * time.Millisecond)
+		selection, err := selectParameters(supportedParams, allParams, paramsCsv, maxAddresses)
+		if err != nil {
+			return err
+		}
+		if selection.Trimmed {
+			logger.WithFields(log.Fields{"max_addresses": maxAddresses, "selected_params": len(selection.Params), "wanted_addresses": selection.Wanted}).Warn("Requested parameters exceed max address count and were trimmed")
+		}
+		if len(selection.Params) == 0 {
+			return fmt.Errorf("no parameters selected; check --params/--all and ECU capability support")
+		}
 
-		// readResponse, err := ssm2_conn.ReadAddresses([]byte{0x46, 0x3c, 0x3D, 0x1C, 0x20, 0x22, 0x29, 0x32, 0x3B, 0xA, 0xD, 0x11, 0xE, 0x9, 0x13})
-		// if err != nil {
-		// 	return err
-		// }
+		addresses, mappings, err := BuildParameterAddressRequest(selection.Params)
+		if err != nil {
+			return err
+		}
+		if len(addresses) > maxAddresses {
+			return fmt.Errorf("selected params would request %d addresses, which exceeds max of %d", len(addresses), maxAddresses)
+		}
+
+		// Cooldown between writes
+		time.Sleep(200 * time.Millisecond)
 
 		sigs := make(chan os.Signal, 1)
 		loop := true
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
 		go func() {
 			for sig := range sigs {
 				if sig == syscall.SIGINT || sig == syscall.SIGTERM {
@@ -108,97 +113,119 @@ var logCmd = &cobra.Command{
 			}
 		}()
 
-		timestamp := time.Now()
-		logfilename := fmt.Sprintf("%s/%s-%d-log.csv", logfile_path, hex.EncodeToString(initResponse.GetRomId()), timestamp.Unix())
-
-		csvfile, err := os.Create(logfilename)
-		if err != nil {
+		if _, err := ssm2_conn.ReadAddressesContinous(addresses); err != nil {
 			return err
 		}
 
-		defer csvfile.Close()
-
-		writer := csv.NewWriter(csvfile)
-		defer writer.Flush()
-
-		header := []string{"timestamp"}
-		var actual_ecu_params []Ssm2Parameter
-		for _, param := range supportedParams {
-			// Checking the limitations of my 2005 ECU
-			// TODO: If you request too many, it'll just timeout. Need to test this
-			// case and be exit gracefully, letting the end user know they're asking
-			// for too many params.
-			// if idx == 40 {
-			// 	break
-			// }
-			if param.EcuByteIndex > 0 && param.Address.Length > 1 {
-				header = append(header, fmt.Sprintf("%s (%s)", param.Name, param.Conversions[0].Units))
-				actual_ecu_params = append(actual_ecu_params, param)
-			}
+		if logFormat == "ndjson" {
+			return streamNdjson(ssm2_conn, &loop, initResponse, mappings, len(addresses))
 		}
+		return streamCsv(ssm2_conn, &loop, initResponse, mappings, len(addresses))
+	},
+}
 
-		logger.WithField("length", len(actual_ecu_params)).Info("Actual ECU params that are supported")
+func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []ParameterMapping, requestedAddressCount int) error {
+	timestamp := time.Now()
+	logfilename := fmt.Sprintf("%s/%s-%d-log.csv", logfile_path, hex.EncodeToString(initResponse.GetRomId()), timestamp.Unix())
 
-		writer.Write(header)
+	csvfile, err := os.Create(logfilename)
+	if err != nil {
+		return err
+	}
+	defer csvfile.Close()
 
-		_, err = ssm2_conn.ReadParameters(actual_ecu_params)
+	writer := csv.NewWriter(csvfile)
+	defer writer.Flush()
+
+	header := []string{"timestamp"}
+	for _, mapping := range mappings {
+		header = append(header, formatHeaderLabel(mapping))
+	}
+	writer.Write(header)
+
+	for *loop {
+		readPacket, err := ssm2Conn.GetNextPacketInStream()
 		if err != nil {
 			return err
 		}
+		payload := readPacket.GetPayloadBytes()
+		if len(payload) != requestedAddressCount {
+			logger.WithFields(log.Fields{"expected_payload": requestedAddressCount, "actual_payload": len(payload)}).Debug("Skipping sample due to unexpected payload length")
+			continue
+		}
 
-		for loop {
-			readPacket, err := ssm2_conn.GetNextPacketInStream()
+		row := []string{fmt.Sprintf("%d", time.Now().Unix())}
+		for _, mapping := range mappings {
+			start := mapping.Start
+			end := start + mapping.Length
+			value := payload[start:end]
+			convertedValue, err := mapping.Param.Convert(mapping.Units, value)
 			if err != nil {
 				return err
 			}
-
-			readResponseBytes := readPacket.GetData()
-			logger.WithFields(log.Fields{"length": len(readResponseBytes), "data": hex.EncodeToString(readResponseBytes)}).Debug("Read Response")
-
-			row := []string{fmt.Sprintf("%d", time.Now().Unix())}
-			for idx, param := range actual_ecu_params {
-				length := 1
-				if param.Address.Length > 1 {
-					length = param.Address.Length
-				}
-				value := readResponseBytes[idx : idx+length]
-				convertedValue, err := param.Convert(param.Conversions[0].Units, value)
-				if err != nil {
-					return err
-				}
-				row = append(row, fmt.Sprintf("%f", convertedValue))
-				logger.WithFields(log.Fields{
-					"param":           param.Name,
-					"length":          length,
-					"byteval":         hex.EncodeToString(value),
-					"expr":            param.Conversions[0].Expr,
-					"converted_value": convertedValue,
-				}).Debug("Parameter Conversion")
-			}
-
-			writer.Write(row)
+			row = append(row, fmt.Sprintf("%f", convertedValue))
 		}
 
-		logger.Info("Received Stop Signal and discontinued logging")
+		writer.Write(row)
+	}
 
-		return nil
-	},
+	logger.Info("Received Stop Signal and discontinued logging")
+	return nil
+}
+
+func streamNdjson(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []ParameterMapping, requestedAddressCount int) error {
+	encoder := json.NewEncoder(os.Stdout)
+	romID := hex.EncodeToString(initResponse.GetRomId())
+	ssmID := hex.EncodeToString(initResponse.GetSsmId())
+
+	for *loop {
+		readPacket, err := ssm2Conn.GetNextPacketInStream()
+		if err != nil {
+			return err
+		}
+		payload := readPacket.GetPayloadBytes()
+		if len(payload) != requestedAddressCount {
+			logger.WithFields(log.Fields{"expected_payload": requestedAddressCount, "actual_payload": len(payload)}).Debug("Skipping sample due to unexpected payload length")
+			continue
+		}
+
+		data := map[string]float64{}
+		for _, mapping := range mappings {
+			start := mapping.Start
+			end := start + mapping.Length
+			value := payload[start:end]
+			convertedValue, err := mapping.Param.Convert(mapping.Units, value)
+			if err != nil {
+				return err
+			}
+			data[normalizeNdjsonKey(mapping.Name, mapping.Units)] = convertedValue
+		}
+
+		sample := ndjsonSample{
+			Ts:    time.Now().UnixMilli(),
+			RomID: romID,
+			SsmID: ssmID,
+			Data:  data,
+		}
+		if err := encoder.Encode(sample); err != nil {
+			return err
+		}
+	}
+
+	logger.Info("Received Stop Signal and discontinued logging")
+	return nil
 }
 
 func init() {
 	rootCmd.AddCommand(logCmd)
 
-	// Here you will define your flags and configuration settings.
+	logCmd.Flags().StringVar(&logfile_path, "logfile-path", ".", "Path where the logfile will be generated. The actual file will be <logfile-path>/<ecu romid>-<timestamp>-log.csv.")
+	logCmd.Flags().StringVar(&defsPath, "defs", "logger_STD_EN_v336.xml", "Path to RomRaider logger definition XML")
+	logCmd.Flags().StringVar(&logFormat, "format", "csv", "Output format: csv or ndjson")
+	logCmd.Flags().StringVar(&paramsCsv, "params", "", "Comma-separated list of parameter names to log")
+	logCmd.Flags().BoolVar(&allParams, "all", false, "Log all supported parameters (subject to --max-addresses)")
+	logCmd.Flags().IntVar(&maxAddresses, "max-addresses", 45, "Maximum number of ECU addresses to request in a single logging packet")
 
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// logCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// logCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-
-	logCmd.Flags().StringVar(&logfile_path, "logfile-path", "", "Path where the logfile will be generated. The actual file will be <logfile-path>/<ecu romid>-<timestamp>-log.csv. Default is the current directory.")
 	viper.BindPFlag("logfile-path", logCmd.Flags().Lookup("logfile-path"))
 	viper.SetDefault("logfile-path", ".")
 }
