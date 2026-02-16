@@ -9,6 +9,73 @@ I finally found PiMonitor, which I found I could modify easily enough to run hea
 
 So, I set-out to build this.
 
+## Logging usage
+
+### CSV logging (default)
+
+```bash
+./ssm2logger --port /dev/ttyUSB0 log --logfile-path .
+```
+
+Useful flags for `log`:
+
+- `--defs <path>`: RomRaider logger definitions XML (default: `logger_STD_EN_v336.xml`)
+- `--format <csv|ndjson>`: output mode (default: `csv`)
+- `--params "name1,name2,..."`: comma-separated parameter names from the XML
+- `--all`: request all ECU-supported parameters (subject to max addresses)
+- `--max-addresses <int>`: cap request address count (default: `45`)
+- `--logfile-path <path>`: CSV output directory (default: current directory `.`)
+
+- `--unix-socket <path>`: send NDJSON lines to a unix domain socket instead of stdout (`--format ndjson` only)
+
+### NDJSON logging (for MQTT pipelines)
+
+```bash
+./ssm2logger --port /dev/ttyUSB0 log \
+  --defs logger_STD_EN_v370.xml \
+  --format ndjson \
+  --params "Engine Speed,Mass Airflow,Rear O2 Sensor,Estimated odometer"
+```
+
+Example piping NDJSON into MQTT publisher:
+
+```bash
+./ssm2logger --port /dev/ttyUSB0 log --format ndjson \
+  | mosquitto_pub -l -h localhost -t subaru/telemetry
+```
+
+
+### NDJSON to unix socket (CSV disabled)
+
+When you set `--format ndjson`, CSV file output is disabled.
+
+```bash
+./ssm2logger --port /dev/ttyUSB0 log \
+  --format ndjson \
+  --unix-socket /tmp/ssm2logger.sock
+```
+
+The logger now creates and listens on that socket path, then waits for one client to connect.
+
+Connect with a client like:
+
+```bash
+socat -u UNIX-CONNECT:/tmp/ssm2logger.sock STDOUT
+```
+
+Start `ssm2logger` first, then connect `socat`.
+
+### List ECU-supported parameters
+
+```bash
+./ssm2logger --port /dev/ttyUSB0 params --defs logger_STD_EN_v370.xml
+```
+
+`params` command flags:
+
+- `--defs <path>`: RomRaider logger definitions XML
+- `--format <text|ndjson>`: output format (default: `text`)
+
 # Credits
 I drew inspiration, and copied quite a lot of code from (https://github.com/src0x/LibSSM2), the .NET C# library for SSM2. In fact, I started down the path of trying to use it for my solution, but realized pretty quickly that writing cross-platform .NET Core that talks to serial ports could be quite difficult.
 
