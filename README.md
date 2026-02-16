@@ -26,6 +26,8 @@ Useful flags for `log`:
 - `--max-addresses <int>`: cap request address count (default: `45`)
 - `--logfile-path <path>`: CSV output directory (default: current directory `.`)
 
+- `--unix-socket <path>`: send NDJSON lines to a unix domain socket instead of stdout (`--format ndjson` only)
+
 ### NDJSON logging (for MQTT pipelines)
 
 ```bash
@@ -41,6 +43,25 @@ Example piping NDJSON into MQTT publisher:
 ./ssm2logger --port /dev/ttyUSB0 log --format ndjson \
   | mosquitto_pub -l -h localhost -t subaru/telemetry
 ```
+
+
+### NDJSON to unix socket (CSV disabled)
+
+When you set `--format ndjson`, CSV file output is disabled.
+
+```bash
+./ssm2logger --port /dev/ttyUSB0 log \
+  --format ndjson \
+  --unix-socket /tmp/ssm2logger.sock
+```
+
+You can test with a local listener:
+
+```bash
+socat -u UNIX-LISTEN:/tmp/ssm2logger.sock,fork STDOUT
+```
+
+Run `socat` first, then start `ssm2logger`.
 
 ### List ECU-supported parameters
 

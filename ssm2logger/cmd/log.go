@@ -19,6 +19,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -36,6 +38,7 @@ var logFormat string
 var paramsCsv string
 var allParams bool
 var maxAddresses int
+var unixSocketPath string
 
 type ndjsonSample struct {
 	Ts    int64              `json:"ts"`
@@ -51,6 +54,9 @@ var logCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if logFormat != "csv" && logFormat != "ndjson" {
 			return fmt.Errorf("unsupported format %q; expected csv or ndjson", logFormat)
+		}
+		if unixSocketPath != "" && logFormat != "ndjson" {
+			return fmt.Errorf("--unix-socket can only be used with --format ndjson")
 		}
 
 		logDefs, err := loadLoggerDefinitions(defsPath)
@@ -118,7 +124,7 @@ var logCmd = &cobra.Command{
 		}
 
 		if logFormat == "ndjson" {
-			return streamNdjson(ssm2_conn, &loop, initResponse, mappings, len(addresses))
+			return streamNdjson(ssm2_conn, &loop, initResponse, mappings, len(addresses), unixSocketPath)
 		}
 		return streamCsv(ssm2_conn, &loop, initResponse, mappings, len(addresses))
 	},
@@ -173,8 +179,16 @@ func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitRespo
 	return nil
 }
 
-func streamNdjson(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []ParameterMapping, requestedAddressCount int) error {
-	encoder := json.NewEncoder(os.Stdout)
+func streamNdjson(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []ParameterMapping, requestedAddressCount int, socketPath string) error {
+	writer, closeFn, err := ndjsonWriter(socketPath)
+	if err != nil {
+		return err
+	}
+	if closeFn != nil {
+		defer closeFn()
+	}
+
+	encoder := json.NewEncoder(writer)
 	romID := hex.EncodeToString(initResponse.GetRomId())
 	ssmID := hex.EncodeToString(initResponse.GetSsmId())
 
@@ -225,7 +239,21 @@ func init() {
 	logCmd.Flags().StringVar(&paramsCsv, "params", "", "Comma-separated list of parameter names to log")
 	logCmd.Flags().BoolVar(&allParams, "all", false, "Log all supported parameters (subject to --max-addresses)")
 	logCmd.Flags().IntVar(&maxAddresses, "max-addresses", 45, "Maximum number of ECU addresses to request in a single logging packet")
+	logCmd.Flags().StringVar(&unixSocketPath, "unix-socket", "", "Unix domain socket path for NDJSON output (requires --format ndjson)")
 
 	viper.BindPFlag("logfile-path", logCmd.Flags().Lookup("logfile-path"))
 	viper.SetDefault("logfile-path", ".")
+}
+
+func ndjsonWriter(socketPath string) (io.Writer, func() error, error) {
+	if socketPath == "" {
+		return os.Stdout, nil, nil
+	}
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to unix socket %q: %w", socketPath, err)
+	}
+
+	return conn, conn.Close, nil
 }
