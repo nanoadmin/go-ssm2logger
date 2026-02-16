@@ -250,42 +250,10 @@ func ndjsonWriter(socketPath string) (io.Writer, func() error, error) {
 		return os.Stdout, nil, nil
 	}
 
-	if _, err := os.Stat(socketPath); err == nil {
-		if err := os.Remove(socketPath); err != nil {
-			return nil, nil, fmt.Errorf("failed to remove existing unix socket %q: %w", socketPath, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, nil, fmt.Errorf("failed to inspect unix socket path %q: %w", socketPath, err)
-	}
-
-	listener, err := net.Listen("unix", socketPath)
+	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to listen on unix socket %q: %w", socketPath, err)
+		return nil, nil, fmt.Errorf("failed to connect to unix socket %q: %w", socketPath, err)
 	}
 
-	logger.WithField("unix_socket", socketPath).Info("Waiting for unix socket client connection")
-	conn, err := listener.Accept()
-	if err != nil {
-		listener.Close()
-		os.Remove(socketPath)
-		return nil, nil, fmt.Errorf("failed to accept unix socket client on %q: %w", socketPath, err)
-	}
-
-	closeFn := func() error {
-		connErr := conn.Close()
-		listenerErr := listener.Close()
-		removeErr := os.Remove(socketPath)
-		if connErr != nil {
-			return connErr
-		}
-		if listenerErr != nil {
-			return listenerErr
-		}
-		if removeErr != nil && !os.IsNotExist(removeErr) {
-			return removeErr
-		}
-		return nil
-	}
-
-	return conn, closeFn, nil
+	return conn, conn.Close, nil
 }
