@@ -55,15 +55,13 @@ When you set `--format ndjson`, CSV file output is disabled.
   --unix-socket /tmp/ssm2logger.sock
 ```
 
-The logger now creates and listens on that socket path, then waits for one client to connect.
-
-Connect with a client like:
+You can test with a local listener:
 
 ```bash
-socat -u UNIX-CONNECT:/tmp/ssm2logger.sock STDOUT
+socat -u UNIX-LISTEN:/tmp/ssm2logger.sock,fork STDOUT
 ```
 
-Start `ssm2logger` first, then connect `socat`.
+Run `socat` first, then start `ssm2logger`.
 
 ### List ECU-supported parameters
 

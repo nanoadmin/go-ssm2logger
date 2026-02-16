@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Knetic/govaluate"
 	. "github.com/rgeyer/ssm2logger/ssm2lib"
 )
 
@@ -38,12 +37,6 @@ type selectedParamsResult struct {
 	Trimmed   bool
 	Wanted    int
 	SelectedN int
-}
-
-type compiledMapping struct {
-	ParameterMapping
-	ndjsonKey string
-	expr      *govaluate.EvaluableExpression
 }
 
 func loadLoggerDefinitions(path string) (*Ssm2Logger, error) {
@@ -77,7 +70,7 @@ func getSsmProtocolParameters(logDefs *Ssm2Logger) []Ssm2Parameter {
 }
 
 func getSupportedParameters(allParams []Ssm2Parameter, capBytes []byte) []Ssm2Parameter {
-	supported := make([]Ssm2Parameter, 0, len(allParams))
+	supported := []Ssm2Parameter{}
 	for _, param := range allParams {
 		if param.EcuByteIndex < uint(len(capBytes)) {
 			if (capBytes[param.EcuByteIndex] & (1 << param.EcuBit)) > 0 {
@@ -90,7 +83,7 @@ func getSupportedParameters(allParams []Ssm2Parameter, capBytes []byte) []Ssm2Pa
 
 func splitParamNames(csv string) []string {
 	parts := strings.Split(csv, ",")
-	retval := make([]string, 0, len(parts))
+	retval := []string{}
 	for _, part := range parts {
 		trimmed := strings.TrimSpace(part)
 		if trimmed != "" {
@@ -111,7 +104,7 @@ func selectParameters(supported []Ssm2Parameter, all bool, paramsCsv string, max
 		if len(requestedNames) == 0 {
 			requestedNames = defaultTelemetryParamNames
 		}
-		lookup := make(map[string]Ssm2Parameter, len(supported))
+		lookup := map[string]Ssm2Parameter{}
 		for _, param := range supported {
 			lookup[strings.ToLower(param.Name)] = param
 		}
@@ -124,7 +117,7 @@ func selectParameters(supported []Ssm2Parameter, all bool, paramsCsv string, max
 
 	requestedAddressCount := 0
 	totalWanted := 0
-	trimmed := make([]Ssm2Parameter, 0, len(chosen))
+	trimmed := []Ssm2Parameter{}
 	for _, param := range chosen {
 		length := ParameterLength(param)
 		totalWanted += length
@@ -167,57 +160,4 @@ func normalizeNdjsonKey(name string, units string) string {
 		}
 	}
 	return base
-}
-
-func buildCompiledMappings(mappings []ParameterMapping) ([]compiledMapping, error) {
-	compiled := make([]compiledMapping, 0, len(mappings))
-	for _, mapping := range mappings {
-		exprString := ""
-		for _, conversion := range mapping.Param.Conversions {
-			if conversion.Units == mapping.Units {
-				exprString = conversion.Expr
-				break
-			}
-		}
-		if exprString == "" {
-			return nil, fmt.Errorf("unable to find conversion for parameter %q with unit %q", mapping.Name, mapping.Units)
-		}
-
-		expr, err := govaluate.NewEvaluableExpression(exprString)
-		if err != nil {
-			return nil, err
-		}
-
-		compiled = append(compiled, compiledMapping{
-			ParameterMapping: mapping,
-			ndjsonKey:        normalizeNdjsonKey(mapping.Name, mapping.Units),
-			expr:             expr,
-		})
-	}
-
-	return compiled, nil
-}
-
-func bytesToInt(value []byte) int {
-	if len(value) == 4 {
-		return int(uint(value[3]) | uint(value[2])<<8 | uint(value[1])<<16 | uint(value[0])<<24)
-	}
-	if len(value) == 2 {
-		return int(uint(value[1]) | uint(value[0])<<8)
-	}
-	if len(value) == 1 {
-		return int(value[0])
-	}
-	return 0
-}
-
-func evaluateCompiledMapping(mapping compiledMapping, payload []byte) (float64, error) {
-	start := mapping.Start
-	end := start + mapping.Length
-	value := payload[start:end]
-	result, err := mapping.expr.Evaluate(map[string]interface{}{"x": bytesToInt(value)})
-	if err != nil {
-		return 0, err
-	}
-	return result.(float64), nil
 }

@@ -106,11 +106,6 @@ var logCmd = &cobra.Command{
 			return fmt.Errorf("selected params would request %d addresses, which exceeds max of %d", len(addresses), maxAddresses)
 		}
 
-		compiledMappings, err := buildCompiledMappings(mappings)
-		if err != nil {
-			return err
-		}
-
 		// Cooldown between writes
 		time.Sleep(200 * time.Millisecond)
 
@@ -130,13 +125,13 @@ var logCmd = &cobra.Command{
 		}
 
 		if logFormat == "ndjson" {
-			return streamNdjson(ssm2_conn, &loop, initResponse, compiledMappings, len(addresses), unixSocketPath)
+			return streamNdjson(ssm2_conn, &loop, initResponse, mappings, len(addresses), unixSocketPath)
 		}
-		return streamCsv(ssm2_conn, &loop, initResponse, compiledMappings, len(addresses))
+		return streamCsv(ssm2_conn, &loop, initResponse, mappings, len(addresses))
 	},
 }
 
-func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []compiledMapping, requestedAddressCount int) error {
+func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []ParameterMapping, requestedAddressCount int) error {
 	timestamp := time.Now()
 	logfilename := fmt.Sprintf("%s/%s-%d-log.csv", logfile_path, hex.EncodeToString(initResponse.GetRomId()), timestamp.Unix())
 
@@ -151,7 +146,7 @@ func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitRespo
 
 	header := []string{"timestamp"}
 	for _, mapping := range mappings {
-		header = append(header, formatHeaderLabel(mapping.ParameterMapping))
+		header = append(header, formatHeaderLabel(mapping))
 	}
 	writer.Write(header)
 
@@ -166,13 +161,16 @@ func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitRespo
 			continue
 		}
 
-		row := []string{strconv.FormatInt(time.Now().Unix(), 10)}
+		row := []string{fmt.Sprintf("%d", time.Now().Unix())}
 		for _, mapping := range mappings {
-			convertedValue, err := evaluateCompiledMapping(mapping, payload)
+			start := mapping.Start
+			end := start + mapping.Length
+			value := payload[start:end]
+			convertedValue, err := mapping.Param.Convert(mapping.Units, value)
 			if err != nil {
 				return err
 			}
-			row = append(row, strconv.FormatFloat(convertedValue, 'f', 6, 64))
+			row = append(row, fmt.Sprintf("%f", convertedValue))
 		}
 
 		writer.Write(row)
@@ -182,7 +180,7 @@ func streamCsv(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitRespo
 	return nil
 }
 
-func streamNdjson(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []compiledMapping, requestedAddressCount int, socketPath string) error {
+func streamNdjson(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitResponsePacket, mappings []ParameterMapping, requestedAddressCount int, socketPath string) error {
 	writer, closeFn, err := ndjsonWriter(socketPath)
 	if err != nil {
 		return err
@@ -206,13 +204,16 @@ func streamNdjson(ssm2Conn *Ssm2Connection, loop *bool, initResponse *Ssm2InitRe
 			continue
 		}
 
-		data := make(map[string]float64, len(mappings))
+		data := map[string]float64{}
 		for _, mapping := range mappings {
-			convertedValue, err := evaluateCompiledMapping(mapping, payload)
+			start := mapping.Start
+			end := start + mapping.Length
+			value := payload[start:end]
+			convertedValue, err := mapping.Param.Convert(mapping.Units, value)
 			if err != nil {
 				return err
 			}
-			data[mapping.ndjsonKey] = convertedValue
+			data[normalizeNdjsonKey(mapping.Name, mapping.Units)] = convertedValue
 		}
 
 		sample := ndjsonSample{
@@ -250,42 +251,10 @@ func ndjsonWriter(socketPath string) (io.Writer, func() error, error) {
 		return os.Stdout, nil, nil
 	}
 
-	if _, err := os.Stat(socketPath); err == nil {
-		if err := os.Remove(socketPath); err != nil {
-			return nil, nil, fmt.Errorf("failed to remove existing unix socket %q: %w", socketPath, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, nil, fmt.Errorf("failed to inspect unix socket path %q: %w", socketPath, err)
-	}
-
-	listener, err := net.Listen("unix", socketPath)
+	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to listen on unix socket %q: %w", socketPath, err)
+		return nil, nil, fmt.Errorf("failed to connect to unix socket %q: %w", socketPath, err)
 	}
 
-	logger.WithField("unix_socket", socketPath).Info("Waiting for unix socket client connection")
-	conn, err := listener.Accept()
-	if err != nil {
-		listener.Close()
-		os.Remove(socketPath)
-		return nil, nil, fmt.Errorf("failed to accept unix socket client on %q: %w", socketPath, err)
-	}
-
-	closeFn := func() error {
-		connErr := conn.Close()
-		listenerErr := listener.Close()
-		removeErr := os.Remove(socketPath)
-		if connErr != nil {
-			return connErr
-		}
-		if listenerErr != nil {
-			return listenerErr
-		}
-		if removeErr != nil && !os.IsNotExist(removeErr) {
-			return removeErr
-		}
-		return nil
-	}
-
-	return conn, closeFn, nil
+	return conn, conn.Close, nil
 }

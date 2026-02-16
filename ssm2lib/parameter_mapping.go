@@ -35,13 +35,8 @@ func ExpandAddress(base []byte, offset int) ([]byte, error) {
 }
 
 func BuildParameterAddressRequest(params []Ssm2Parameter) ([][]byte, []ParameterMapping, error) {
-	totalAddresses := 0
-	for _, param := range params {
-		totalAddresses += ParameterLength(param)
-	}
-
-	addresses := make([][]byte, 0, totalAddresses)
-	mappings := make([]ParameterMapping, 0, len(params))
+	addresses := [][]byte{}
+	mappings := []ParameterMapping{}
 	offset := 0
 
 	for _, param := range params {
