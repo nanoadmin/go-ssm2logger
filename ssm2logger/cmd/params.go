@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	. "github.com/rgeyer/ssm2logger/ssm2lib"
+	. "github.com/nanoadmin/go-ssm2logger/ssm2lib"
 	"github.com/spf13/cobra"
 )
 

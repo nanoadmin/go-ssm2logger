@@ -14,7 +14,7 @@
 
 package main
 
-import "github.com/rgeyer/ssm2logger/ssm2logger/cmd"
+import "github.com/nanoadmin/go-ssm2logger/ssm2logger/cmd"
 
 func main() {
 	cmd.Execute()

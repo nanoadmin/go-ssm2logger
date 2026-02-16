@@ -6,7 +6,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	. "github.com/rgeyer/ssm2logger/ssm2lib"
+	. "github.com/nanoadmin/go-ssm2logger/ssm2lib"
 )
 
 var _ = Describe("Ssm2lib", func() {
