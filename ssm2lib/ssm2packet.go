@@ -69,6 +69,26 @@ func (b Ssm2PacketBytes) GetData() []byte {
 	return b[Ssm2PacketIndexData : int(Ssm2PacketIndexData)+b.GetDataSize()]
 }
 
+func (b Ssm2PacketBytes) GetPayloadBytes() []byte {
+	payloadLength := b.GetDataSize() - 1
+	if payloadLength <= 0 {
+		return []byte{}
+	}
+
+	start := int(Ssm2PacketIndexCommand) + 1
+	end := start + payloadLength
+	if start > len(b) {
+		return []byte{}
+	}
+	if end > len(b)-1 {
+		end = len(b) - 1
+	}
+	if end < start {
+		return []byte{}
+	}
+	return b[start:end]
+}
+
 func (b Ssm2PacketBytes) GetCommand() Ssm2Command {
 	return Ssm2Command(b[Ssm2PacketIndexCommand])
 }
